@@ -1,0 +1,891 @@
+// BuildersConnect — Prisma Schema
+// Phase 2: Full relational domain model
+//
+// Design principles:
+//   - All monetary values stored as Int (pesewas). GHS 1 = 100 pesewas.
+//   - IDs use cuid() for URL safety and distributed uniqueness.
+//   - Enums are uppercased and correspond 1:1 with src/types/index.ts.
+//   - Soft-deletes are NOT used — sensitive records are archived via status fields.
+//   - @@index covers every FK that will appear in WHERE clauses.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL_UNPOOLED")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+enum UserRole {
+  CUSTOMER
+  TRADESPERSON
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum VerificationStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+  REQUIRES_REVIEW
+}
+
+enum OnboardingStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum JobStatus {
+  DRAFT
+  OPEN
+  MATCHED
+  SHORTLISTED
+  HIRED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+  DISPUTED
+  CLOSED
+}
+
+enum BudgetType {
+  FIXED
+  RANGE
+  REQUEST_QUOTE
+}
+
+enum UrgencyLevel {
+  FLEXIBLE
+  WITHIN_A_WEEK
+  WITHIN_A_MONTH
+  URGENT
+}
+
+enum PropertyType {
+  HOUSE
+  APARTMENT
+  COMMERCIAL
+  LAND
+  OTHER
+}
+
+enum InterestStatus {
+  PENDING
+  SHORTLISTED
+  HIRED
+  DECLINED
+  WITHDRAWN
+}
+
+enum HireStatus {
+  AWAITING_PAYMENT
+  FUNDED
+  IN_PROGRESS
+  SUBMITTED_COMPLETE
+  COMPLETED
+  DISPUTED
+  REFUNDED
+  CLOSED
+}
+
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  HELD
+  RELEASED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  FAILED
+}
+
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum RefundStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+}
+
+enum DisputeReason {
+  POOR_WORKMANSHIP
+  INCOMPLETE_WORK
+  PAYMENT_DISAGREEMENT
+  NO_SHOW
+  DAMAGE
+  MISLEADING_DESCRIPTION
+  ABUSIVE_BEHAVIOUR
+  OTHER
+}
+
+enum DisputeStatus {
+  OPEN
+  AWAITING_EVIDENCE
+  UNDER_REVIEW
+  RESOLVED_CUSTOMER_FAVOUR
+  RESOLVED_TRADESPERSON_FAVOUR
+  PARTIALLY_RESOLVED
+  CLOSED
+}
+
+enum DisputeRaisedBy {
+  CUSTOMER
+  TRADESPERSON
+}
+
+enum DocumentType {
+  GHANA_CARD_FRONT
+  GHANA_CARD_BACK
+  SELFIE
+  QUALIFICATION
+  CERTIFICATION
+  LICENCE
+  OTHER
+}
+
+enum NotificationType {
+  JOB_INTEREST_RECEIVED
+  JOB_SHORTLISTED
+  JOB_HIRED
+  JOB_FUNDED
+  JOB_COMPLETED
+  JOB_CANCELLED
+  DISPUTE_OPENED
+  DISPUTE_RESOLVED
+  MESSAGE_RECEIVED
+  PAYMENT_RECEIVED
+  PAYOUT_SENT
+  VERIFICATION_APPROVED
+  VERIFICATION_REJECTED
+  REVIEW_RECEIVED
+  ACCOUNT_SUSPENDED
+}
+
+enum AuditAction {
+  USER_CREATED
+  USER_SUSPENDED
+  USER_RESTORED
+  VERIFICATION_APPROVED
+  VERIFICATION_REJECTED
+  JOB_MODERATED
+  JOB_REMOVED
+  DISPUTE_RESOLVED
+  PAYMENT_RELEASED
+  REFUND_ISSUED
+  ADMIN_NOTE_ADDED
+}
+
+enum GhanaRegion {
+  GREATER_ACCRA
+  ASHANTI
+  WESTERN
+  EASTERN
+  CENTRAL
+  VOLTA
+  NORTHERN
+  UPPER_EAST
+  UPPER_WEST
+  BRONG_AHAFO
+  OTI
+  AHAFO
+  BONO_EAST
+  NORTH_EAST
+  SAVANNAH
+  WESTERN_NORTH
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTH / USER CORE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model User {
+  id                 String    @id @default(cuid())
+  email              String    @unique
+  emailVerified      DateTime?
+  passwordHash       String?
+  name               String?
+  image              String?
+  role               UserRole  @default(CUSTOMER)
+  onboardingComplete Boolean   @default(false)
+  suspended          Boolean   @default(false)
+  suspendedAt        DateTime?
+  suspendedReason    String?
+  createdAt          DateTime  @default(now())
+  updatedAt          DateTime  @updatedAt
+
+  // NextAuth adapter relations (for future OAuth / magic-link support)
+  accounts           Account[]
+  sessions           Session[]
+
+  // Domain relations
+  customerProfile     CustomerProfile?
+  tradespersonProfile TradespersonProfile?
+  sentMessages        ChatMessage[]       @relation("MessageSender")
+  customerThreads     ChatThread[]        @relation("CustomerThreads")
+  tradespersonThreads ChatThread[]        @relation("TradespersonThreads")
+  notifications       Notification[]
+  auditLogsActed      AuditLog[]          @relation("AuditActor")
+  adminNotes          AdminNote[]         @relation("AdminNoteAuthor")
+  reviewsGiven        Review[]            @relation("ReviewGiver")
+  reviewsReceived     Review[]            @relation("ReviewReceiver")
+  disputesRaised      Dispute[]           @relation("DisputeRaiser")
+  disputesResolved    Dispute[]           @relation("DisputeResolver")
+  disputeEvidence     DisputeEvidence[]
+
+  @@index([email])
+  @@index([role])
+  @@index([suspended])
+}
+
+// NextAuth — OAuth accounts
+model Account {
+  id                String  @id @default(cuid())
+  userId            String
+  type              String
+  provider          String
+  providerAccountId String
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user              User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+}
+
+// NextAuth — DB sessions (strategy: "database" only — not used with JWT)
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique
+  userId       String
+  expires      DateTime
+
+  user         User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// NextAuth — email verification tokens
+model VerificationToken {
+  identifier String
+  token      String   @unique
+  expires    DateTime
+
+  @@unique([identifier, token])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CUSTOMER PROFILE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model CustomerProfile {
+  id        String      @id @default(cuid())
+  userId    String      @unique
+  phone     String?
+  region    GhanaRegion?
+  city      String?
+  address   String?
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+
+  user      User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+  jobs      Job[]
+  hires     Hire[]      @relation("CustomerHires")
+  payments  Payment[]
+
+  @@index([userId])
+  @@index([region])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRADESPERSON PROFILE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TradespersonProfile {
+  id                    String             @id @default(cuid())
+  userId                String             @unique
+  businessName          String?
+  phone                 String?
+  bio                   String?            @db.Text
+  yearsOfExperience     Int?
+  verificationStatus    VerificationStatus @default(PENDING)
+  onboardingStatus      OnboardingStatus   @default(DRAFT)
+  ghanaCardNumber       String?
+  ghanaCardName         String?
+  paystackRecipientCode String?
+  payoutAccountNumber   String?
+  payoutAccountName     String?
+  averageRating         Decimal?           @db.Decimal(3, 2)
+  totalReviews          Int                @default(0)
+  totalJobsCompleted    Int                @default(0)
+  createdAt             DateTime           @default(now())
+  updatedAt             DateTime           @updatedAt
+
+  user                  User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  categories            TradespersonCategory[]
+  serviceAreas          TradespersonServiceArea[]
+  verificationDocuments VerificationDocument[]
+  portfolioImages       PortfolioImage[]
+  qualifications        Qualification[]
+  interests             JobInterest[]
+  hires                 Hire[]             @relation("TradespersonHires")
+  paymentHolds          PaymentHold[]
+  payouts               Payout[]
+  reviews               Review[]           @relation("TradespersonReviews")
+
+  @@index([userId])
+  @@index([verificationStatus])
+  @@index([onboardingStatus])
+  @@index([averageRating])
+}
+
+// Junction: tradesperson ↔ trade category
+model TradespersonCategory {
+  tradespersonId String
+  categoryId     String
+  isPrimary      Boolean @default(false)
+
+  tradesperson   TradespersonProfile @relation(fields: [tradespersonId], references: [id], onDelete: Cascade)
+  category       TradeCategory       @relation(fields: [categoryId], references: [id])
+
+  @@id([tradespersonId, categoryId])
+  @@index([categoryId])
+}
+
+// Junction: tradesperson ↔ service regions
+model TradespersonServiceArea {
+  tradespersonId String
+  region         GhanaRegion
+
+  tradesperson   TradespersonProfile @relation(fields: [tradespersonId], references: [id], onDelete: Cascade)
+
+  @@id([tradespersonId, region])
+  @@index([region])
+}
+
+// Tradesperson project portfolio
+model PortfolioImage {
+  id             String   @id @default(cuid())
+  tradespersonId String
+  publicId       String
+  url            String
+  caption        String?
+  sortOrder      Int      @default(0)
+  createdAt      DateTime @default(now())
+
+  tradesperson   TradespersonProfile @relation(fields: [tradespersonId], references: [id], onDelete: Cascade)
+
+  @@index([tradespersonId])
+}
+
+// Tradesperson qualifications / certifications / licences
+model Qualification {
+  id             String       @id @default(cuid())
+  tradespersonId String
+  type           DocumentType @default(QUALIFICATION)
+  title          String
+  issuingBody    String?
+  issueDate      DateTime?
+  expiryDate     DateTime?
+  publicId       String?
+  url            String?
+  createdAt      DateTime     @default(now())
+
+  tradesperson   TradespersonProfile @relation(fields: [tradespersonId], references: [id], onDelete: Cascade)
+
+  @@index([tradespersonId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// IDENTITY VERIFICATION DOCUMENTS
+// Ghana Card — stored as Cloudinary private assets
+// ─────────────────────────────────────────────────────────────────────────────
+
+model VerificationDocument {
+  id             String       @id @default(cuid())
+  tradespersonId String
+  documentType   DocumentType
+  publicId       String
+  url            String
+  uploadedAt     DateTime     @default(now())
+  reviewedAt     DateTime?
+  reviewedById   String?
+  adminNotes     String?
+
+  tradesperson   TradespersonProfile @relation(fields: [tradespersonId], references: [id], onDelete: Cascade)
+
+  @@index([tradespersonId])
+  @@index([documentType])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// TRADE CATEGORIES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model TradeCategory {
+  id          String  @id @default(cuid())
+  name        String
+  slug        String  @unique
+  description String?
+  icon        String?
+  color       String?
+  sortOrder   Int     @default(0)
+  isActive    Boolean @default(true)
+  parentId    String?
+
+  parent      TradeCategory?  @relation("CategoryHierarchy", fields: [parentId], references: [id])
+  children    TradeCategory[] @relation("CategoryHierarchy")
+  jobs        Job[]
+  tradespeople TradespersonCategory[]
+
+  @@index([slug])
+  @@index([parentId])
+  @@index([isActive])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// JOBS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Job {
+  id               String        @id @default(cuid())
+  customerId       String
+  categoryId       String
+  title            String
+  description      String        @db.Text
+  region           GhanaRegion
+  city             String?
+  address          String?
+  budgetType       BudgetType
+  budgetMin        Int?
+  budgetMax        Int?
+  urgency          UrgencyLevel  @default(FLEXIBLE)
+  propertyType     PropertyType?
+  desiredStartDate DateTime?
+  status           JobStatus     @default(DRAFT)
+  viewCount        Int           @default(0)
+  interestCount    Int           @default(0)
+  createdAt        DateTime      @default(now())
+  updatedAt        DateTime      @updatedAt
+  publishedAt      DateTime?
+  closedAt         DateTime?
+
+  customer         CustomerProfile  @relation(fields: [customerId], references: [id])
+  category         TradeCategory    @relation(fields: [categoryId], references: [id])
+  images           JobImage[]
+  interests        JobInterest[]
+  shortlists       Shortlist[]
+  hire             Hire?
+  chatThreads      ChatThread[]
+  payment          Payment?
+  dispute          Dispute?
+  reviews          Review[]
+  adminNotes       AdminNote[]   @relation("JobAdminNotes")
+
+  @@index([customerId])
+  @@index([categoryId])
+  @@index([status])
+  @@index([region])
+  @@index([createdAt])
+  @@index([status, region])
+  @@index([status, categoryId])
+}
+
+model JobImage {
+  id        String   @id @default(cuid())
+  jobId     String
+  publicId  String
+  url       String
+  caption   String?
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  job       Job      @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@index([jobId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// INTEREST / APPLICATION
+// ─────────────────────────────────────────────────────────────────────────────
+
+model JobInterest {
+  id                   String         @id @default(cuid())
+  jobId                String
+  tradespersonId       String
+  coverLetter          String?        @db.Text
+  estimatedCostPesewas Int?
+  estimatedDuration    String?
+  availableFrom        DateTime?
+  status               InterestStatus @default(PENDING)
+  createdAt            DateTime       @default(now())
+  updatedAt            DateTime       @updatedAt
+
+  job                  Job                 @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  tradesperson         TradespersonProfile @relation(fields: [tradespersonId], references: [id])
+  shortlist            Shortlist?
+
+  @@unique([jobId, tradespersonId])
+  @@index([jobId])
+  @@index([tradespersonId])
+  @@index([status])
+}
+
+model Shortlist {
+  id             String   @id @default(cuid())
+  jobId          String
+  tradespersonId String
+  interestId     String   @unique
+  createdAt      DateTime @default(now())
+
+  job            Job             @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  interest       JobInterest     @relation(fields: [interestId], references: [id])
+
+  @@unique([jobId, tradespersonId])
+  @@index([jobId])
+  @@index([tradespersonId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// HIRE
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Hire {
+  id                   String     @id @default(cuid())
+  jobId                String     @unique
+  tradespersonId       String
+  customerId           String
+  agreedAmountPesewas  Int
+  status               HireStatus @default(AWAITING_PAYMENT)
+  scopeNotes           String?    @db.Text
+  completedAt          DateTime?
+  createdAt            DateTime   @default(now())
+  updatedAt            DateTime   @updatedAt
+
+  job                  Job                 @relation(fields: [jobId], references: [id])
+  tradesperson         TradespersonProfile @relation("TradespersonHires", fields: [tradespersonId], references: [id])
+  customer             CustomerProfile     @relation("CustomerHires", fields: [customerId], references: [id])
+  payment              Payment?
+  dispute              Dispute?
+
+  @@index([tradespersonId])
+  @@index([customerId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// CHAT
+// ─────────────────────────────────────────────────────────────────────────────
+
+model ChatThread {
+  id             String    @id @default(cuid())
+  jobId          String
+  customerId     String
+  tradespersonId String
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  job            Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  customer       User          @relation("CustomerThreads", fields: [customerId], references: [id])
+  tradesperson   User          @relation("TradespersonThreads", fields: [tradespersonId], references: [id])
+  messages       ChatMessage[]
+
+  @@unique([jobId, tradespersonId])
+  @@index([customerId])
+  @@index([tradespersonId])
+  @@index([jobId])
+}
+
+model ChatMessage {
+  id          String    @id @default(cuid())
+  threadId    String
+  senderId    String
+  content     String?   @db.Text
+  readAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  thread      ChatThread          @relation(fields: [threadId], references: [id], onDelete: Cascade)
+  sender      User                @relation("MessageSender", fields: [senderId], references: [id])
+  attachments MessageAttachment[]
+
+  @@index([threadId])
+  @@index([senderId])
+  @@index([threadId, createdAt])
+  @@index([readAt])
+}
+
+model MessageAttachment {
+  id        String   @id @default(cuid())
+  messageId String
+  publicId  String
+  url       String
+  filename  String?
+  mimeType  String?
+  bytes     Int?
+  createdAt DateTime @default(now())
+
+  message   ChatMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@index([messageId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// PAYMENTS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Payment {
+  id                    String        @id @default(cuid())
+  jobId                 String        @unique
+  hireId                String        @unique
+  customerId            String
+  paystackReference     String        @unique
+  paystackTransactionId String?
+  grossAmountPesewas    Int
+  commissionPesewas     Int
+  pspFeePesewas         Int
+  netPayoutPesewas      Int
+  status                PaymentStatus @default(PENDING)
+  channel               String?
+  paidAt                DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  job                   Job             @relation(fields: [jobId], references: [id])
+  hire                  Hire            @relation(fields: [hireId], references: [id])
+  customer              CustomerProfile @relation(fields: [customerId], references: [id])
+  hold                  PaymentHold?
+  payout                Payout?
+  commission            Commission?
+  refunds               Refund[]
+
+  @@index([customerId])
+  @@index([status])
+  @@index([paystackReference])
+  @@index([paidAt])
+}
+
+model PaymentHold {
+  id               String    @id @default(cuid())
+  paymentId        String    @unique
+  tradespersonId   String
+  amountPesewas    Int
+  releasedAt       DateTime?
+  releasedByUserId String?
+  releaseReason    String?
+  createdAt        DateTime  @default(now())
+
+  payment          Payment             @relation(fields: [paymentId], references: [id])
+  tradesperson     TradespersonProfile @relation(fields: [tradespersonId], references: [id])
+
+  @@index([tradespersonId])
+  @@index([releasedAt])
+}
+
+model Commission {
+  id            String   @id @default(cuid())
+  paymentId     String   @unique
+  amountPesewas Int
+  rate          Decimal  @db.Decimal(4, 3)
+  collectedAt   DateTime @default(now())
+
+  payment       Payment  @relation(fields: [paymentId], references: [id])
+}
+
+model Payout {
+  id                    String       @id @default(cuid())
+  paymentId             String       @unique
+  tradespersonId        String
+  amountPesewas         Int
+  paystackRecipientCode String
+  paystackTransferCode  String?
+  status                PayoutStatus @default(PENDING)
+  failureReason         String?
+  initiatedAt           DateTime     @default(now())
+  completedAt           DateTime?
+
+  payment               Payment             @relation(fields: [paymentId], references: [id])
+  tradesperson          TradespersonProfile @relation(fields: [tradespersonId], references: [id])
+
+  @@index([tradespersonId])
+  @@index([status])
+}
+
+model Refund {
+  id                String       @id @default(cuid())
+  paymentId         String
+  amountPesewas     Int
+  paystackRefundId  String?
+  reason            String?
+  status            RefundStatus @default(PENDING)
+  initiatedByUserId String?
+  initiatedAt       DateTime     @default(now())
+  completedAt       DateTime?
+
+  payment           Payment @relation(fields: [paymentId], references: [id])
+
+  @@index([paymentId])
+  @@index([status])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DISPUTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Dispute {
+  id           String          @id @default(cuid())
+  jobId        String          @unique
+  hireId       String          @unique
+  raisedById   String
+  raisedByType DisputeRaisedBy
+  reason       DisputeReason
+  description  String          @db.Text
+  status       DisputeStatus   @default(OPEN)
+  resolution   String?         @db.Text
+  resolvedAt   DateTime?
+  resolvedById String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  job          Job             @relation(fields: [jobId], references: [id])
+  hire         Hire            @relation(fields: [hireId], references: [id])
+  raisedBy     User            @relation("DisputeRaiser", fields: [raisedById], references: [id])
+  resolvedBy   User?           @relation("DisputeResolver", fields: [resolvedById], references: [id])
+  evidence     DisputeEvidence[]
+  adminNotes   AdminNote[]     @relation("DisputeAdminNotes")
+
+  @@index([status])
+  @@index([raisedById])
+  @@index([createdAt])
+}
+
+model DisputeEvidence {
+  id           String   @id @default(cuid())
+  disputeId    String
+  uploadedById String
+  publicId     String
+  url          String
+  description  String?
+  createdAt    DateTime @default(now())
+
+  dispute      Dispute  @relation(fields: [disputeId], references: [id], onDelete: Cascade)
+  uploadedBy   User     @relation(fields: [uploadedById], references: [id])
+
+  @@index([disputeId])
+  @@index([uploadedById])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REVIEWS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Review {
+  id             String   @id @default(cuid())
+  jobId          String
+  tradespersonId String
+  reviewerId     String
+  revieweeId     String
+  rating         Int
+  comment        String?  @db.Text
+  isPublic       Boolean  @default(true)
+  isModerated    Boolean  @default(false)
+  moderatedAt    DateTime?
+  moderatedById  String?
+  createdAt      DateTime @default(now())
+
+  job            Job                 @relation(fields: [jobId], references: [id])
+  tradesperson   TradespersonProfile @relation("TradespersonReviews", fields: [tradespersonId], references: [id])
+  reviewer       User                @relation("ReviewGiver", fields: [reviewerId], references: [id])
+  reviewee       User                @relation("ReviewReceiver", fields: [revieweeId], references: [id])
+
+  @@unique([jobId, reviewerId])
+  @@index([tradespersonId])
+  @@index([reviewerId])
+  @@index([revieweeId])
+  @@index([jobId])
+  @@index([isModerated])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// NOTIFICATIONS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model Notification {
+  id        String           @id @default(cuid())
+  userId    String
+  type      NotificationType
+  title     String
+  body      String
+  link      String?
+  readAt    DateTime?
+  createdAt DateTime         @default(now())
+
+  user      User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, readAt])
+  @@index([createdAt])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ADMIN NOTES
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AdminNote {
+  id        String   @id @default(cuid())
+  authorId  String
+  content   String   @db.Text
+  jobId     String?
+  disputeId String?
+  userId    String?
+  createdAt DateTime @default(now())
+
+  author    User     @relation("AdminNoteAuthor", fields: [authorId], references: [id])
+  job       Job?     @relation("JobAdminNotes", fields: [jobId], references: [id])
+  dispute   Dispute? @relation("DisputeAdminNotes", fields: [disputeId], references: [id])
+
+  @@index([authorId])
+  @@index([jobId])
+  @@index([disputeId])
+  @@index([userId])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUDIT LOGS
+// ─────────────────────────────────────────────────────────────────────────────
+
+model AuditLog {
+  id         String      @id @default(cuid())
+  actorId    String?
+  action     AuditAction
+  targetType String
+  targetId   String
+  metadata   Json?
+  ipAddress  String?
+  createdAt  DateTime    @default(now())
+
+  actor      User?       @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([actorId])
+  @@index([targetType, targetId])
+  @@index([action])
+  @@index([createdAt])
+}
