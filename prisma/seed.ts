@@ -258,7 +258,7 @@ async function seedAdminUser() {
   console.log("Seeding admin user...");
 
   const email = process.env.SEED_ADMIN_EMAIL ?? "admin@buildersconnect.gh";
-  const password = process.env.SEED_ADMIN_PASSWORD ?? "BuildersConnect2024!";
+  const password = (process.env.SEED_ADMIN_PASSWORD ?? "BuildersConnect2024!").trim();
   const name = process.env.SEED_ADMIN_NAME ?? "Platform Admin";
 
   if (password === "BuildersConnect2024!") {
@@ -271,7 +271,7 @@ async function seedAdminUser() {
 
   const admin = await db.user.upsert({
     where: { email },
-    update: { name, role: "ADMIN", onboardingComplete: true },
+    update: { name, passwordHash, role: "ADMIN", onboardingComplete: true },
     create: {
       email,
       name,
